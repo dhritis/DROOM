@@ -1,0 +1,183 @@
+use FileHandle;
+### for a given sample you can provide
+
+my $gffList = shift; ### list of gff files (comma separated)
+my $samList = shift; ### list of sam or bam files (comma separated)
+my $baseName = shift; ### name that you want to refer to the sample as
+
+my $scale = 1;
+my %genes;
+my @gffs = split ",",$gffList;
+{
+	my %seq;
+	foreach my $f (@gffs) {
+		my $fh = new FileHandle($f);
+		while (<$fh>) {
+			chomp;
+			my @d = split /\t/;
+			my $strand = $d[6];
+			if ($strand eq "+") {
+				$strand = 0;
+			} elsif ($strand eq "-") {
+				$strand = 1;
+			} elsif ($strand eq "*") {
+				$strand = 3;
+			} else {
+				$strand = 2;
+			}
+			if ($d[2] eq "gene") {
+				for (my $i = $d[3] - 1; $i <= $d[4]; $i++) {
+					$seq{$d[0]}[$strand][$i]++;
+				}
+			} elsif ($d[2] eq "region") {
+				$seq{$d[0]}[0][$d[4]] += 0;
+				$seq{$d[0]}[1][$d[4]] += 0;
+				my $end = int($d[4]/$scale);
+				$posCnt{$d[0]}[0][$end] = 0;
+				$posCnt{$d[0]}[1][$end] = 0;
+			}
+		}
+		$fh->close();
+	}
+
+	foreach my $f (@gffs) {
+		my $fh = new FileHandle($f);
+		while (<$fh>) {
+			chomp;
+			my @d = split /\t/;
+			my $strand = $d[6];
+			if ($strand eq "+") {
+				$strand = 0;
+			} elsif ($strand eq "-") {
+				$strand = 1;
+			} elsif ($strand eq "*") {
+				$strand = 3;
+			} else {
+				$strand = 2;
+			}
+			if ($d[2] eq "gene") {
+				for (my $i = $d[3] - 1; $i <= $d[4]; $i++) {
+					if ($seq{$d[0]}[$strand][$i] == 1) {
+						if ($d[8] =~ /gene:(\S+?);/) {
+							my $v = $1;
+							$genes{$d[0]}[$strand][$i] = $v;
+						} else {
+							print STDERR "ERROR: Could not find protein id!\n";
+						}
+					} else {
+						$genes{$d[0]}[$i] = "Ambig";
+					}
+				}
+			} elsif ($d[2] eq "xxx" && $d[8] =~ /pseudo=true/) {
+				for (my $i = $d[3] - 1; $i <= $d[4]; $i++) {
+					if ($seq{$d[0]}[$strand][$i] == 1) {
+						if ($d[8] =~ /ID=gene:(\S+?);/) {
+							my $v = $1;
+							$genes{$d[0]}[$strand][$i] = $v;
+						} else {
+							print STDERR "ERROR: Could not find protein id!\n";
+						}
+					} else {
+						$genes{$d[0]}[$i] = "Ambig";
+					}
+				}
+			} elsif ($d[1] eq "BLAST") {
+				for (my $i = $d[3] - 1; $i <= $d[4]; $i++) {
+					if ($seq{$d[0]}[$strand][$i] == 1) {
+						if ($d[8] =~ /ID=(.*)/) {
+							my $v = $1;
+							$genes{$d[0]}[$strand][$i] = $v;
+						} else {
+							print STDERR "ERROR: Could not find protein id!\n";
+						}
+					} else {
+						$genes{$d[0]}[$i] = "Ambig";
+					}
+				}
+			}
+		}
+		$fh->close();
+	}
+	### measure the intergenic regions with length info
+	my %interMap;
+	foreach my $i (keys %seq) {
+		for (my $k = 0; $k < 2; $k++) {
+			my $inter = 0;
+			my $pos = 0;
+			for (my $j = 0; $j < @{$seq{$i}[$k]}; $j++) {
+				if ($genes{$i}[$k][$j]) {
+					$inter=$j+1;
+				} else {
+					$pos = int(($j-$inter)/100);
+					$genes{$i}[$k][$j] = "Inter.$i.$k.$inter.$pos";
+				}
+			}
+		}
+	}
+}
+
+
+my @sams = split ",",$samList;
+foreach my $s (@sams) {
+	print STDERR $s,"\n";
+  if ($s =~ /\.sam$/ || $s =~ /\.sam.gz/) {
+		$fh = new FileHandle($s);
+  } else {
+		$fh = new FileHandle("samtools view $s |");
+  }
+	while (<$fh>) {
+		last if /^\@/;
+	}
+	while (<$fh>) {
+		s/gi\|\d+\|ref\|//;
+		s/\|//;
+		if (/^\@SQ.*SN:(\S+)/) {
+			$id = $1;
+		}
+		next if /^\@/;
+		my $l = $_;
+		chomp;
+		my @d = split /\t/;
+		next if $d[1] & 4;
+		$readCnt{$d[0]}++;
+	}
+	$fh->close();
+	my $fh = new FileHandle($s);
+	while (<$fh>) {
+		last if /^\@/;
+	}
+	while (<$fh>) {
+		s/gi\|\d+\|ref\|//;
+		s/\|//;
+		if (/^\@SQ.*SN:(\S+)/) {
+			$id = $1;
+		}
+		next if /^\@/;
+		my $l = $_;
+		chomp;
+		my @d = split /\t/;
+		next if $d[1] & 4;
+		my $sum = 0;
+		while ($d[5] =~ s/(\d+)M//) {
+			$sum += $1;
+		}
+		my $pos = $d[3] += int($sum/2);
+		my $b = int($d[3]/$scale);
+		my $e = int(($d[3]+$sum)/$scale);
+		$id = $d[2];
+		my $strand = $d[1] & 16;
+		if ($strand) {
+			$strand = 1;
+		}
+		$geneCnt{$genes{$id}[$strand][$pos]}+=(1/$readCnt{$d[0]});
+		for (my $j = $b; $j <= $e; $j++) {
+			$posCnt{$id}[$strand][$j]+=(1/$readCnt{$d[0]});
+		}
+	}
+	$fh->close();
+}
+my $fo = new FileHandle(">$baseName.cnts");
+foreach my $i (keys %geneCnt) {
+	print $fo "$i\t$geneCnt{$i}\n";
+}
+$fo->close();
